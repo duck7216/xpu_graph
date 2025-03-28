@@ -5,6 +5,7 @@ import torch
 from torch._dynamo.backends.common import aot_autograd
 from torch._functorch.aot_autograd import aot_export_module
 from torch._subclasses.fake_tensor import FakeTensorMode
+from torch._dynamo.utils import detect_fake_mode
 
 from .passes.pass_manager import PassManager
 from .passes.patterns.pattern import Pattern
@@ -100,10 +101,12 @@ class XpuGraph:
                     if xpu_compiled is None:
                         xpu_compiled = self._pass_manager(gm, fake_inputs)
                         # xpu_compiled = self._cache.save_gm(hashkey, xpu_compiled)
-                        if self._config.target != Target("npu"):
+                        if self._config.target != Target("ascend"):
                             xpu_compiled = self._cache.save_gm(hashkey, xpu_compiled)
                 else:
                     xpu_compiled = self._pass_manager(gm, fake_inputs)
+
+                xpu_compiled.num_mutation_input = len(example_inputs)
 
                 logger.debug(f"after xpu_graph, graph like:\n {xpu_compiled.graph}")
                 logger.info("xpu_graph passes complete")
@@ -139,7 +142,15 @@ class XpuGraph:
 
             return _compiler(unlifted_gm, example_inputs)
         else:
-            xpu_gm = aot_autograd(fw_compiler=_compiler)(dynamo_gm, example_inputs)
+            fake_mode = detect_fake_mode(example_inputs) or torch._subclasses.FakeTensorMode(
+                allow_non_fake_inputs=True
+            )
+            tracing_context = (
+                torch._guards.TracingContext.try_get()
+                or torch._guards.TracingContext(fake_mode)
+            )
+            with torch._guards.tracing(tracing_context):
+                xpu_gm = aot_autograd(fw_compiler=_compiler)(dynamo_gm, example_inputs)
             return xpu_gm
 
     def get_pattern_manager(self):
